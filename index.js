@@ -24,7 +24,7 @@ app.get("/", (req, res) => {
 });
 
 const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb");
-const uri = `mongodb+srv://${process.env.DB_USER}:${process.env.DB_PASS}@cluster0.xrup6i8.mongodb.net/yourDBName?retryWrites=true&w=majority`;
+const uri = `mongodb+srv://${process.env.DB_USER}:${process.env.DB_PASS}@cluster0.xrup6i8.mongodb.net/smartDealsDB?retryWrites=true&w=majority`;
 
 const client = new MongoClient(uri, {
   serverApi: {
@@ -64,11 +64,11 @@ async function run() {
       }
     };
 
-    app.get("/products", async (req, res) => {
-      const cursor = productsCollection.find();
-      const result = await cursor.toArray();
-      res.send(result);
-    });
+    // app.get("/products", async (req, res) => {
+    //   const cursor = productsCollection.find();
+    //   const result = await cursor.toArray();
+    //   res.send(result);
+    // });
 
     app.get("/latest-products", async (req, res) => {
       const cursor = productsCollection
@@ -163,6 +163,9 @@ async function run() {
       const email = req.query.email;
       const query = {};
       if (email) {
+        if (req.user.email !== email) {
+          return res.status(403).send({ message: "Forbidden" });
+        }
         query.sellerEmail = email;
       }
       const cursor = productsCollection.find(query);
