@@ -12,9 +12,12 @@ const decoded = Buffer.from(
 ).toString("utf8");
 const serviceAccount = JSON.parse(decoded);
 
-admin.initializeApp({
-  credential: admin.credential.cert(serviceAccount),
-});
+// ✅ Guard against re-initialization in serverless environments
+if (!admin.apps.length) {
+  admin.initializeApp({
+    credential: admin.credential.cert(serviceAccount),
+  });
+}
 
 app.use(cors());
 app.use(express.json());
@@ -46,47 +49,80 @@ async function run() {
       if (!req.headers.authorization) {
         return res.status(401).send({ message: "Unauthorized access" });
       }
-
       const token = req.headers.authorization.split(" ")[1];
-
       if (!token) {
         return res.status(401).send({ message: "Unauthorized access" });
       }
-
       try {
         const userInfo = await admin.auth().verifyIdToken(token);
-
         req.user = userInfo;
-
         next();
       } catch (error) {
         return res.status(403).send({ message: "Forbidden access" });
       }
     };
 
-    // app.get("/products", async (req, res) => {
-    //   const cursor = productsCollection.find();
-    //   const result = await cursor.toArray();
-    //   res.send(result);
-    // });
+    // ─── Products ─────────────────────────────────────────────
 
-    app.get("/latest-products", async (req, res) => {
-      const cursor = productsCollection
-        .find()
-        .sort({
-          created_at: -1,
-        })
-        .limit(6);
-      const result = await cursor.toArray();
-      res.send(result);
+    // ✅ No email → public (all products)
+    // ✅ Has email → token required, can only access own products
+    app.get("/products", async (req, res) => {
+      const email = req.query.email;
+
+      if (!email) {
+        try {
+          const result = await productsCollection.find().toArray();
+          return res.send(result);
+        } catch {
+          return res.status(500).send({ error: "Failed to fetch products" });
+        }
+      }
+
+      // Email provided — verify token and ownership
+      const authHeader = req.headers.authorization;
+      if (!authHeader) {
+        return res.status(401).send({ message: "Unauthorized access" });
+      }
+
+      const token = authHeader.split(" ")[1];
+      if (!token) {
+        return res.status(401).send({ message: "Unauthorized access" });
+      }
+
+      try {
+        const userInfo = await admin.auth().verifyIdToken(token);
+        if (userInfo.email !== email) {
+          return res.status(403).send({ message: "Forbidden" });
+        }
+        const result = await productsCollection
+          .find({ sellerEmail: email })
+          .toArray();
+        return res.send(result);
+      } catch {
+        return res.status(403).send({ message: "Forbidden" });
+      }
     });
 
+    // ✅ Must be BEFORE /products/:productId to avoid route conflict
+    app.get("/latest-products", async (req, res) => {
+      try {
+        const result = await productsCollection
+          .find()
+          .sort({ created_at: -1 })
+          .limit(6)
+          .toArray();
+        res.send(result);
+      } catch {
+        res.status(500).send({ error: "Failed to fetch latest products" });
+      }
+    });
+
+    // ✅ Must be BEFORE /products/:productId to avoid route conflict
     app.get("/products/search", async (req, res) => {
       try {
         const searchText = req.query.q;
-        if (!searchText) {
-          return res.send([]);
-        }
+        if (!searchText) return res.send([]);
+
         const query = {
           $or: [
             { title: { $regex: searchText, $options: "i" } },
@@ -96,94 +132,109 @@ async function run() {
           ],
         };
 
-        const cursor = productsCollection
+        const result = await productsCollection
           .find(query)
-          .sort({
-            created_at: -1,
-          })
-          .limit(6);
-        const result = await cursor.toArray();
+          .sort({ created_at: -1 })
+          .limit(6)
+          .toArray();
         res.send(result);
       } catch {
-        res.status(501).send({ error: "Search failed" });
+        res.status(500).send({ error: "Search failed" });
       }
     });
 
     app.get("/products/:productId", async (req, res) => {
-      const id = req.params.productId;
-      const query = { _id: new ObjectId(id) };
-      const result = await productsCollection.findOne(query);
-      res.send(result);
+      try {
+        const result = await productsCollection.findOne({
+          _id: new ObjectId(req.params.productId),
+        });
+        if (!result)
+          return res.status(404).send({ message: "Product not found" });
+        res.send(result);
+      } catch {
+        res.status(500).send({ error: "Failed to fetch product" });
+      }
     });
 
     app.post("/products", async (req, res) => {
-      const newProduct = req.body;
-      const result = await productsCollection.insertOne(newProduct);
-      res.send(result);
+      try {
+        const result = await productsCollection.insertOne(req.body);
+        res.send(result);
+      } catch {
+        res.status(500).send({ error: "Failed to add product" });
+      }
     });
 
     app.delete("/products/:productId", async (req, res) => {
-      const product_id = req.params.productId;
-      const query = { _id: new ObjectId(product_id) };
-      const result = await productsCollection.deleteOne(query);
-      res.send(result);
+      try {
+        const result = await productsCollection.deleteOne({
+          _id: new ObjectId(req.params.productId),
+        });
+        res.send(result);
+      } catch {
+        res.status(500).send({ error: "Failed to delete product" });
+      }
     });
 
     app.patch("/products/:productId", async (req, res) => {
-      const id = req.params.productId;
-      const updateProduct = req.body;
-      const query = { _id: new ObjectId(id) };
-      const update = {
-        $set: updateProduct,
-      };
-      const result = await productsCollection.updateOne(query, update);
-      res.send(result);
+      try {
+        const result = await productsCollection.updateOne(
+          { _id: new ObjectId(req.params.productId) },
+          { $set: req.body },
+        );
+        res.send(result);
+      } catch {
+        res.status(500).send({ error: "Failed to update product" });
+      }
     });
+
+    // ─── Bids ──────────────────────────────────────────────────
 
     app.post("/bids", async (req, res) => {
-      const newBid = req.body;
-      const result = await bidsCollection.insertOne(newBid);
-      res.send(result);
+      try {
+        const result = await bidsCollection.insertOne(req.body);
+        res.send(result);
+      } catch {
+        res.status(500).send({ error: "Failed to place bid" });
+      }
     });
 
+    // ✅ Fixed: require email, prevent fetching all bids without it
     app.get("/bids", verifyToken, async (req, res) => {
       const email = req.query.email;
+
+      if (!email) {
+        return res
+          .status(400)
+          .send({ message: "Email query param is required" });
+      }
 
       if (req.user.email !== email) {
         return res.status(403).send({ message: "Forbidden" });
       }
 
-      const query = email ? { buyerEmail: email } : {};
-      const cursor = bidsCollection.find(query);
-      const result = await cursor.toArray();
-      res.send(result);
-    });
-
-    app.get("/products", verifyToken, async (req, res) => {
-      const email = req.query.email;
-      const query = {};
-      if (email) {
-        if (req.user.email !== email) {
-          return res.status(403).send({ message: "Forbidden" });
-        }
-        query.sellerEmail = email;
+      try {
+        const result = await bidsCollection
+          .find({ buyerEmail: email })
+          .toArray();
+        res.send(result);
+      } catch {
+        res.status(500).send({ error: "Failed to fetch bids" });
       }
-      const cursor = productsCollection.find(query);
-      const result = await cursor.toArray();
-      res.send(result);
     });
 
     app.get("/product/bids/:productId", async (req, res) => {
-      const productId = req.params.productId;
-      const query = {
-        product_id: productId,
-      };
-      const cursor = bidsCollection.find(query).sort({ created_at: -1 });
-      const result = await cursor.toArray();
-      res.send(result);
+      try {
+        const result = await bidsCollection
+          .find({ product_id: req.params.productId })
+          .sort({ created_at: -1 })
+          .toArray();
+        res.send(result);
+      } catch {
+        res.status(500).send({ error: "Failed to fetch bids for product" });
+      }
     });
 
-    // await client.db("admin").command({ ping: 1 });
     console.log(
       "Pinged your deployment. You successfully connected to MongoDB!",
     );
@@ -193,6 +244,5 @@ async function run() {
 
 run().catch(console.dir);
 
-// app.listen(port, () => {
-//   console.log(`Server is running on port ${port}`);
-// });
+// ✅ Required for Vercel — do not use app.listen
+module.exports = app;
