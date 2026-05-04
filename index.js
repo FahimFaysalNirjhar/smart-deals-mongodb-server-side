@@ -31,11 +31,9 @@ const client = new MongoClient(uri, {
   },
 });
 
-// ✅ Cached collections — reused across all requests
 let productsCollection;
 let bidsCollection;
 
-// ✅ Connect once, reuse forever
 async function connectDB() {
   if (!productsCollection || !bidsCollection) {
     await client.connect();
@@ -63,7 +61,6 @@ const verifyToken = async (req, res, next) => {
   }
 };
 
-// ✅ Ensure DB is connected before every request
 app.use(async (req, res, next) => {
   try {
     await connectDB();
